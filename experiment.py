@@ -9,6 +9,7 @@ from sklearn.metrics import roc_auc_score, f1_score, accuracy_score, precision_s
 from scipy.optimize import minimize_scalar
 
 import os
+import typer
 
 from featureselection import *
 
@@ -19,6 +20,7 @@ import numpy as np
 import random
 import time
 
+from loadDataUCI import *
 import radMLBench
 
 import optuna
@@ -28,12 +30,24 @@ optuna.logging.set_verbosity(optuna.logging.FATAL)
 
 # overall repeats of the whole procedures
 nRepeats = 25
+search_space = None
 
 
 # around 1029 experiments 3*7*(15+15+9+9+1)
-search_space = {
+search_space_radMLBench = {
     'fs_method': ["LASSO", "ET", "MRMRe"],
     'N': [2**k for k in range(0,6)],
+    'clf_method': ["RBFSVM", "RandomForest", "LogisticRegression", "NaiveBayes"],
+    'RF_n_estimators': [50,100,250],
+    'RF_max_depth': [3, 5, 7],
+    'C_LR': [2**k for k in range(-7,8,2)]+[1],
+    'C_SVM': [2**k for k in range(-7,8,2)]+[1]
+}
+
+
+search_space_UCI = {
+    'fs_method': ["None"],
+    'N': [0],
     'clf_method': ["RBFSVM", "RandomForest", "LogisticRegression", "NaiveBayes"],
     'RF_n_estimators': [50,100,250],
     'RF_max_depth': [3, 5, 7],
@@ -82,6 +96,9 @@ def select_features(X, y, fs_method = None, N = None, best_params = None):
     elif fs_method == "ET":
         clf_fs = ExtraTreesClassifier(random_state=42)
         fsel = SelectFromModel(clf_fs, prefit=False, max_features=N, threshold=-np.inf)
+    elif fs_method == "None":
+        fsel = SelectKBest(dummy_score, k = 'all')
+
 
     X_selected = fsel.fit_transform(X, y)
     return X_selected, fsel
@@ -361,7 +378,10 @@ def apply_validation (cfg):
             cfg["dataset"], cfg["valscheme"], cfg["valrepeats"], cfg["repeat"]
         )
 
-        X, y = radMLBench.loadData(dataset, return_X_y=True, local_cache_dir="./datasets")
+        if "datacollection" in cfg and cfg["datacollection"] == "UCI":
+            X, y = loadDatasetUCI (dataset)
+        else:
+            X, y = radMLBench.loadData(dataset, return_X_y=True, local_cache_dir="./datasets")
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.5, random_state=repeat, stratify=y)
 
         resFile = f"./results/{dataset}_{valrepeats}_{valscheme}_{repeat}.dump"
@@ -411,17 +431,34 @@ def apply_validation (cfg):
         raise (e)
 
 
-if __name__ == '__main__':
+
+
+
+def main(cohort: str = typer.Option(...)):
+    global search_space
+    if cohort == "radMLBench":
+        search_space = search_space_radMLBench
+    elif cohort == "UCI":
+        search_space = search_space_UCI
+    else:
+        raise Exception ("Unknown cohort")
+
+
     large_datasets = []
-    for dataset in radMLBench.listDatasets():
-        meta = radMLBench.getMetaData(dataset)
-        if meta["nInstances"] > 100:
-            large_datasets.append(dataset)
+    if cohort == "radMLBench":
+        for dataset in radMLBench.listDatasets():
+            meta = radMLBench.getMetaData(dataset)
+            if meta["nInstances"] > 100:
+                large_datasets.append(dataset)
+    elif cohort == "UCI":
+        for dataset in listDatasetsUCI():
+            X, y = loadDatasetUCI(dataset)
+            if y.shape[0] >= 100:
+                if np.sum(y) > 20:
+                    large_datasets.append(dataset)
 
     print(f"Have {len(large_datasets)} datasets with more than 100 samples.")
-    # large_datasets.remove("UCSF-PDGM")
 
-    # large_datasets = ["Ahn2021"]
     valSchemes = ["CV-5", "CV-10", "CVHoldout-5", "CVHoldout-10", \
                         "NestedCV-5+10", "NestedCV-10+5"] # "NestedCV-5+5",
 
@@ -436,17 +473,24 @@ if __name__ == '__main__':
                         "dataset": dataset,
                         "valscheme": valscheme,
                         "valrepeats": valrepeats,
-                        "repeat": r
+                        "repeat": r,
+                        "datacollection": cohort
                     }
                     subexp.append(exp_params)
         random.shuffle(subexp)
         experiments.extend(subexp)
+    random.shuffle(experiments)
 
     print (f"Computing {len(experiments)} experiments.")
 
     results = Parallel(n_jobs=30)(
         delayed(apply_validation)(e) for e in experiments
     )
+
+if __name__ == "__main__":
+    typer.run(main)
+
+
 
     # for e in experiments:
     #     apply_validation(e)

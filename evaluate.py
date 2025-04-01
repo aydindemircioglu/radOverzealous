@@ -5,6 +5,7 @@ from scipy.stats import wilcoxon, linregress
 import pickle
 from glob import glob
 
+from joblib import Parallel, delayed
 from joblib import dump, load
 import numpy as np
 import pandas as pd
@@ -19,6 +20,9 @@ from PIL import Image
 from PIL import ImageDraw, ImageFont
 
 import radMLBench
+from loadDataUCI import *
+from utils import *
+
 
 
 name_mapping = {
@@ -77,115 +81,120 @@ name_mapping = {
 metrics = ['auc', 'accuracy', 'precision', 'recall', 'f1', 'mcc', 'sensitivity', 'specificity']
 
 
-def readResults ():
+
+
+def process_file(z, propTbl, metrics):
     try:
-        results = load("./paper/results_raw.dump")
-        df_org = pd.DataFrame(results).reset_index(drop = True)
-        return df_org
+         results = []
+         if "results_" in z: # just in case
+             return []
+
+         df = load(z)
+
+         base = {"Dataset": df["dataset"], "CV": df["type"]}
+         base.update(propTbl[df["dataset"]])
+         base["CV-Repeats"] = df["valrepeats"]
+         base["Repeat"] = df["repeat"]
+         if base["CV"] == "flat_cv_k" or base["CV"] == "holdout_cv_k":
+             base["Folds"] = df["k"]
+             base["Time"] = df["time"]
+
+             row = base.copy()
+             row["Evaluation"] = "Refit"
+             for metric in metrics:
+                 metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
+                 row[f"{metric_key}-Int"] = df["metrics_refit"][metric]
+                 row[f"{metric_key}-Ext"] = df["final_metrics_refit"][metric]
+                 row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
+             results.append(row)
+
+             row = base.copy()
+             row["Evaluation"] = "Ensemble"
+             for metric in metrics:
+                 metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
+                 row[f"{metric_key}-Int"] = df["metrics_ensemble"][metric]
+                 row[f"{metric_key}-Ext"] = df["final_metrics_ensemble"][metric]
+                 row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
+             results.append(row)
+
+         elif base["CV"] == "nested_cv":
+             base["Folds"] = f'{df["k"]}_{df["l"]}'
+             base["Time"] = df["time"]
+             # nested cv has no 'identify best model config',
+             # so in each inner loop one model is there and its auc,
+             # and there is no selection process. thus we obtain #loops estimates
+
+             # this is the internal CV refits used as ensemble
+             row = base.copy()
+             row["Evaluation"] = "Ensemble-Refit"
+
+             for metric in metrics:
+                 metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
+                 values = [r[metric] for r in df["metrics_refit"]]
+                 row[f"{metric_key}-Int"] = np.mean(values)
+                 row[f"{metric_key}-Ext"] = df["final_metrics_refit"][metric]
+                 row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
+             results.append(row)
+
+             # here we use all internal CV models as ensemble
+             row = base.copy()
+             row["Evaluation"] = "Ensemble-Ensemble"
+             for metric in metrics:
+                 metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
+                 values = [r[metric] for r in df["metrics_ensemble"]]
+                 row[f"{metric_key}-Int"] = np.mean(values)
+                 row[f"{metric_key}-Ext"] = df["final_metrics_ensemble"][metric]
+                 row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
+             results.append(row)
+
+             # for flat we use the internal estimation but another model,
+             # sowe can decide whether to use refit or ensemble
+             # since refit is 'normal', we use that
+             row = base.copy()
+             row["Evaluation"] = "Flat"
+             for metric in metrics:
+                 metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
+                 values = [r[metric] for r in df["metrics_refit"]]
+                 row[f"{metric_key}-Int"] = np.mean(values)
+                 row[f"{metric_key}-Ext"] = df["final_metrics_flat"][metric]
+                 row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
+             results.append(row)
+
+             # here we use the internal refit CV as model, but ensemble it
+             row = base.copy()
+             row["Evaluation"] = "Flat-Ensemble"
+             for metric in metrics:
+                 metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
+                 values = [r[metric] for r in df["metrics_refit"]]
+                 row[f"{metric_key}-Int"] = np.mean(values)
+                 row[f"{metric_key}-Ext"] = df["final_metrics_flat_ensemble"][metric]
+                 row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
+             results.append(row)
+         else:
+             raise Exception (f'Unknown CV: {base["CV"]}')
+         return results
+    except Exception as e:
+        print(f"Error in file {z}: {str(e)}")
+        raise  # Re-raise the exception to stop the process
+
+
+def readResults(cohort):
+    try:
+        results = load(f"./paper/results_{cohort}.dump")
+        return pd.DataFrame(results).reset_index(drop=True)
     except:
         pass
 
     propTbl = {}
-    for dataset in radMLBench.listDatasets():
-        m = radMLBench.getMetaData(dataset)
-        propTbl[dataset] = {"Instances": m['nInstances'],
-            "Features": m["nFeatures"],
-            "Dimensionality": m["Dimensionality"]}
+    datasets = getDatasetList (cohort)
+    files = [f for f in glob("./results/*.dump") if any(os.path.basename(f).startswith(ds) for ds in datasets)]
 
-    array = np.array
-    results = []
-    for z in glob(f"./results/*.dump"):
-        if "results_raw" in z: # just in case
-            continue
-        print(".", end = '', flush = True)
-        df = load(z)
+    with Parallel(n_jobs=30, verbose = 10) as parallel:
+        results = parallel(delayed(process_file)(z, propTbl, metrics) for z in files)
+    results = [item for sublist in results for item in sublist]
 
-        base = {"Dataset": df["dataset"], "CV": df["type"]}
-        base.update(propTbl[df["dataset"]])
-        base["CV-Repeats"] = df["valrepeats"]
-        base["Repeat"] = df["repeat"]
-        if base["CV"] == "flat_cv_k" or base["CV"] == "holdout_cv_k":
-            base["Folds"] = df["k"]
-            base["Time"] = df["time"]
-
-            row = base.copy()
-            row["Evaluation"] = "Refit"
-            for metric in metrics:
-                metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
-                row[f"{metric_key}-Int"] = df["metrics_refit"][metric]
-                row[f"{metric_key}-Ext"] = df["final_metrics_refit"][metric]
-                row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
-            results.append(row)
-
-            row = base.copy()
-            row["Evaluation"] = "Ensemble"
-            for metric in metrics:
-                metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
-                row[f"{metric_key}-Int"] = df["metrics_ensemble"][metric]
-                row[f"{metric_key}-Ext"] = df["final_metrics_ensemble"][metric]
-                row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
-            results.append(row)
-
-        elif base["CV"] == "nested_cv":
-            base["Folds"] = f'{df["k"]}_{df["l"]}'
-            base["Time"] = df["time"]
-            # nested cv has no 'identify best model config',
-            # so in each inner loop one model is there and its auc,
-            # and there is no selection process. thus we obtain #loops estimates
-
-            # this is the internal CV refits used as ensemble
-            row = base.copy()
-            row["Evaluation"] = "Ensemble-Refit"
-
-            for metric in metrics:
-                metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
-                values = [r[metric] for r in df["metrics_refit"]]
-                row[f"{metric_key}-Int"] = np.mean(values)
-                row[f"{metric_key}-Ext"] = df["final_metrics_refit"][metric]
-                row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
-            results.append(row)
-
-            # here we use all internal CV models as ensemble
-            row = base.copy()
-            row["Evaluation"] = "Ensemble-Ensemble"
-            for metric in metrics:
-                metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
-                values = [r[metric] for r in df["metrics_ensemble"]]
-                row[f"{metric_key}-Int"] = np.mean(values)
-                row[f"{metric_key}-Ext"] = df["final_metrics_ensemble"][metric]
-                row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
-            results.append(row)
-
-            # for flat we use the internal estimation but another model,
-            # sowe can decide whether to use refit or ensemble
-            # since refit is 'normal', we use that
-            row = base.copy()
-            row["Evaluation"] = "Flat"
-            for metric in metrics:
-                metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
-                values = [r[metric] for r in df["metrics_refit"]]
-                row[f"{metric_key}-Int"] = np.mean(values)
-                row[f"{metric_key}-Ext"] = df["final_metrics_flat"][metric]
-                row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
-            results.append(row)
-
-            # here we use the internal refit CV as model, but ensemble it
-            row = base.copy()
-            row["Evaluation"] = "Flat-Ensemble"
-            for metric in metrics:
-                metric_key = metric.upper() if metric in ['auc', 'mcc'] else metric.capitalize()
-                values = [r[metric] for r in df["metrics_refit"]]
-                row[f"{metric_key}-Int"] = np.mean(values)
-                row[f"{metric_key}-Ext"] = df["final_metrics_flat_ensemble"][metric]
-                row[f"{metric_key}-Overfitting"] = row[f"{metric_key}-Int"] - row[f"{metric_key}-Ext"]
-            results.append(row)
-        else:
-            raise Exception (f'Unknown CV: {base["CV"]}')
-        # also extract inner CV at least
-
-    dump(results,"./paper/results_raw.dump")
-    df_org = pd.DataFrame(results).reset_index(drop = True)
-    return df_org
+    dump(results, "./paper/results_{cohort}.dump")
+    return pd.DataFrame(results).reset_index(drop=True)
 
 
 
@@ -197,17 +206,41 @@ def groupData (df_org, metric = "AUC"):
     return df
 
 
+def getDatasetList (cohort):
+    large_datasets = []
+    if cohort == "radMLBench":
+        for dataset in radMLBench.listDatasets():
+            m = radMLBench.getMetaData(dataset)
+            if m["nInstances"] > 100:
+                large_datasets.append(dataset)
+    else:
+        for dataset in listDatasetsUCI():
+            X, y = loadDatasetUCI(dataset)
+            if y.shape[0] >= 100 and np.sum(y) > 20:
+                large_datasets.append(dataset)
+    return large_datasets
 
-def createDatasetTable():
+
+
+def createDatasetTable(cohort):
     tbl = []
-    for dataset in radMLBench.listDatasets():
-        m = radMLBench.getMetaData(dataset)
-        tbl.append({"Dataset": dataset, "Modality": m["modality"], "Outcome": m["outcome"],
-            "Instances": m['nInstances'],
-            "Features": m["nFeatures"], "Dimensionality": m["Dimensionality"], "Balance": m["ClassBalance"]})
-        m
+    large_datasets = getDatasetList(cohort)
+    if cohort == "radMLBench":
+        for dataset in large_datasets:
+            m = radMLBench.getMetaData(dataset)
+            tbl.append({"Dataset": dataset, "Modality": m["modality"], "Outcome": m["outcome"],
+                "Instances": m['nInstances'],
+                "Features": m["nFeatures"], "Dimensionality": m["Dimensionality"], "Balance": m["ClassBalance"]})
+    else:
+        for dataset in large_datasets:
+            X, y = loadDatasetUCI(dataset)
+            tbl.append({"Dataset": dataset,
+                "Instances": X.shape[0],
+                "Features": X.shape[1], "Dimensionality": np.round(X.shape[1] / X.shape[0], 3),
+                "Balance": np.round( np.sum(y)/X.shape[0]*100)})
     tbl = pd.DataFrame(tbl)
-    tbl.to_excel("./paper/Table_1.xlsx")
+    tbl = tbl.sort_values(["Dataset"])
+    tbl.to_excel(f"./paper/Table_1_{cohort}.xlsx", index=False)
 
 
 
@@ -225,7 +258,7 @@ def bootstrap_regression(x, y, n_bootstrap=1000):
 
 
 
-def testRelations(diffs, ID, metric = "AUC", DPI = 300):
+def testRelations(diffs, ID, cohort = None, metric = "AUC", DPI = 300):
     diffs = diffs.sort_values([f"{metric}-Overfitting"])
     nFeatures_values = diffs["Features"].values
     nInstances_values = diffs["Instances"].values
@@ -310,13 +343,14 @@ def testRelations(diffs, ID, metric = "AUC", DPI = 300):
     axes[2].axhline(y=0.0, color='red', linewidth=2, zorder=2,  linestyle='--')
 
     plt.tight_layout()
-    os.makedirs("./paper/relations", exist_ok = True)
-    plt.savefig(f"./paper/relations/FigRelation_{ID}.png")
+    os.makedirs(f"./paper/relations_{cohort}", exist_ok = True)
+    plt.savefig(f"./paper/relations_{cohort}/FigRelation_{ID}.png")
     plt.close()
 
 
 
-def generateRelationPlots (df_org, metric = "AUC"):
+
+def generateRelationPlots (df_org, cohort = None, metric = "AUC"):
     df = groupData (df_org)
 
     diffs = df.copy()
@@ -326,10 +360,11 @@ def generateRelationPlots (df_org, metric = "AUC"):
 
     for ID in diffs["ID"].unique():
         subdf = diffs.query("ID == @ID")
-        testRelations(subdf, ID, metric = metric, DPI = 300)
+        testRelations(subdf, ID, cohort = cohort, metric = metric, DPI = 300)
 
 
-def plotVariance (df_org, metric = "AUC"):
+
+def plotVariance (df_org, cohort = None ,metric = "AUC"):
     # want to see the variance per dataset
     df = df_org.copy()
     id_columns = ['CV', 'CV-Repeats', 'Folds', 'Evaluation']
@@ -413,12 +448,12 @@ def plotVariance (df_org, metric = "AUC"):
 
     # Adjust layout and save the figure
     plt.tight_layout()
-    plt.savefig("paper/Figure_7.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"paper/Figure_7_{cohort}.png", dpi=300, bbox_inches='tight')
     plt.close()
 
 
 
-def checkVariancevsSamplesize(df_org, metric = "AUC", DPI=300):
+def checkVariancevsSamplesize(df_org, metric = "AUC", cohort = cohort, DPI=300):
     df = df_org.copy()
     id_columns = ['CV', 'CV-Repeats', 'Folds', 'Evaluation']
     df['ID'] = df[id_columns].astype(str).agg('_'.join, axis=1)
@@ -520,12 +555,11 @@ def checkVariancevsSamplesize(df_org, metric = "AUC", DPI=300):
 
     # Save the plot
     plt.tight_layout()
-    #plt.savefig(f"./paper/FigVarianceVsSampleSize_{metric}.png")
-    plt.savefig(f"./paper/Figure_8.png")
+    plt.savefig(f"./paper/Figure_8_{cohort}.png")
 
 
 
-def generatePlotsPerDataset (df_org):
+def generatePlotsPerDataset (df_org, cohort = None):
     # want to see the variance per dataset
     df = df_org.copy()
     id_columns = ['CV', 'CV-Repeats', 'Folds', 'Evaluation']
@@ -606,13 +640,13 @@ def generatePlotsPerDataset (df_org):
             ax.axhline(y=0.0, color='red', linewidth=2, zorder=2)
 
         plt.tight_layout()
-        os.makedirs("paper/dataset", exist_ok = True)
-        plt.savefig(f"paper/dataset/{dataset}.png", dpi=300, bbox_inches='tight')
+        os.makedirs(f"paper/dataset_{cohort}", exist_ok = True)
+        plt.savefig(f"paper/dataset_{cohort}/{dataset}.png", dpi=300, bbox_inches='tight')
         plt.close()
 
 
 
-def getTimings(df_org):
+def getTimings(df_org, cohort = cohort):
     color_palette = {
         'flat_cv_k_1_5_Refit': '#4c8bf5',
         'flat_cv_k_1_10_Refit': '#4c8bf5',
@@ -702,7 +736,7 @@ def getTimings(df_org):
     plt.xlabel("")
     plt.ylabel("Time (hours)", fontsize=12)
     plt.tight_layout()
-    plt.savefig("paper/Figure_S2.png", dpi=500, bbox_inches="tight")
+    plt.savefig(f"paper/Figure_S2_{cohort}.png", dpi=500, bbox_inches="tight")
     #plt.show()
     plt.close()
 
@@ -740,7 +774,7 @@ def getOverfittingStats(df_org, fname = None, metric = "AUC"):
 
 
 
-def getSummaryTable(df_org, fname = None, metric = "AUC"):
+def getSummaryTable(df_org, cohort = None, fname = None, metric = "AUC"):
     df = groupData (df_org, metric)
 
     mean_table = df.groupby(['CV', 'Folds', 'CV-Repeats', 'Evaluation'])[[f'{metric}-Int', f'{metric}-Ext', f'{metric}-Overfitting', f'{metric}-Performance']].mean().round(3)
@@ -804,10 +838,10 @@ def addBlackBorder(img, pixel):
 def joinRepeatsPlot():
     fontFace = "Arial"
 
-    imA = cv2.imread("./paper/dataset/WORC-Lipo.png")
+    imA = cv2.imread("./paper/dataset_radMLBench/WORC-Lipo.png")
     #imA = addText(imA, "a", (40, 40), fontFace, 112, color=(0, 0, 0))
 
-    imB = cv2.imread("./paper/dataset/PI-CAI.png")
+    imB = cv2.imread("./paper/dataset_radMLBench/PI-CAI.png")
     imB = cv2.resize(imB, (imA.shape[1], imA.shape[0]), interpolation=cv2.INTER_LINEAR)
 
     imA = addBlackBorder(imA, 10)
@@ -824,10 +858,10 @@ def joinRepeatsPlot():
 def joinRelationPlot():
     fontFace = "Arial"
 
-    imA = cv2.imread("./paper/relations/FigRelation_flat_cv_k_1_5_Refit.png")
+    imA = cv2.imread("./paper/relations_radMLBench/FigRelation_flat_cv_k_1_5_Refit.png")
     #imA = addText(imA, "a", (40, 40), fontFace, 112, color=(0, 0, 0))
 
-    imB = cv2.imread("./paper/relations/FigRelation_holdout_cv_k_1_5_Refit.png")
+    imB = cv2.imread("./paper/relations_radMLBench/FigRelation_holdout_cv_k_1_5_Refit.png")
     imB = cv2.resize(imB, (imA.shape[1], imA.shape[0]), interpolation=cv2.INTER_LINEAR)
 
     # imA = addBlackBorder(imA, 10)
@@ -841,7 +875,7 @@ def joinRelationPlot():
 
 
 
-def getAUCIntvsExt(df_org, fname = None, metric = "AUC", leg_anchor = 1.05):
+def getAUCIntvsExt(df_org, fname = None, cohort = None, metric = "AUC", leg_anchor = 1.05):
     df = df_org.groupby(['Dataset', 'CV', 'CV-Repeats', 'Folds', 'Evaluation']).mean().reset_index()
 
     legend_order = ['flat_cv_k_Refit',\
@@ -864,7 +898,10 @@ def getAUCIntvsExt(df_org, fname = None, metric = "AUC", leg_anchor = 1.05):
     mapped_legend_order = [name_mapping.get(id, id) for id in legend_order]
 
     sns.set(style="whitegrid")
-    plt.figure(figsize=(10, 8))
+    if cohort == "radMLBench":
+        plt.figure(figsize=(10, 8))
+    else:
+        plt.figure(figsize=(8, 5))
     ax = plt.gca()
     scatter = sns.scatterplot(
         data=summary_table,
@@ -879,14 +916,20 @@ def getAUCIntvsExt(df_org, fname = None, metric = "AUC", leg_anchor = 1.05):
         sizes=(70, 244),
         alpha = 0.7,
     )
-    # ticks = [0.625 + i * 0.025 for i in range(7)]  # Generate tick values
-    # plt.xticks(ticks, [f"{round(tick, 3):.3f}".rstrip('0').rstrip('.') for tick in ticks])  # Format and round
-    # plt.yticks(ticks, [f"{round(tick, 3):.3f}".rstrip('0').rstrip('.') for tick in ticks])  # Format and round
-    plt.plot([0.615, 0.69], [0.615, 0.69], color='red', linestyle='--', linewidth=1.5, alpha = 0.7)
-    plt.gca().margins(0)
-    plt.gca().set_aspect('equal', adjustable='box')  # Ensure 1:1 aspect ratio
-    plt.xlim(0.615, 0.77)
-    plt.ylim(0.615, 0.69)
+
+    if cohort == "radMLBench":
+        plt.plot([0.615, 0.69], [0.615, 0.69], color='red', linestyle='--', linewidth=1.5, alpha = 0.7)
+        plt.gca().margins(0)
+        plt.gca().set_aspect('equal', adjustable='box')  # Ensure 1:1 aspect ratio
+        plt.xlim(0.615, 0.77)
+        plt.ylim(0.615, 0.69)
+    else:
+        plt.plot([0.872, 0.897], [0.872, 0.897], color='red', linestyle='--', linewidth=1.5, alpha = 0.7)
+        plt.gca().margins(0)
+        plt.gca().set_aspect('equal', adjustable='box')  # Ensure 1:1 aspect ratio
+        plt.xlim(0.872, 0.897)
+        plt.ylim(0.872, 0.897)
+
     plt.title(f' ', fontsize=14)
     plt.xlabel(f'{metric} [Validation estimate]', fontsize=12)
     plt.ylabel(f'{metric} [Test performance]', fontsize=12)
@@ -965,30 +1008,24 @@ color_palette = {
 
 
 
-
-
 if __name__ == '__main__':
     os.makedirs("paper", exist_ok = True)
-    createDatasetTable()
-    df_org = readResults()
-    getSummaryTable(df_org, fname = 'Table_3', metric = "AUC")
-    getOverfittingStats(df_org, fname = None, metric = "AUC")
-    checkVariancevsSamplesize(df_org, metric = "AUC", DPI=300)
+    for cohort in ["radMLBench", "UCI"]:
+        print (f"\n\n\nProcessing cohort {cohort}")
+        createDatasetTable(cohort)
+        df_org = readResults(cohort)
+        getSummaryTable(df_org, cohort = cohort, fname = f'Table_2_{cohort}', metric = "AUC")
+        getOverfittingStats(df_org, fname = None, metric = "AUC")
+        checkVariancevsSamplesize(df_org, cohort = cohort, metric = "AUC", DPI=300)
+        getAUCIntvsExt(df_org, metric = "AUC", cohort = cohort, fname=f"Figure_5_{cohort}", leg_anchor = 1.085)
+        getTimings(df_org, cohort = cohort)
+        generateRelationPlots(df_org, cohort = cohort) # AUC only
+        generatePlotsPerDataset(df_org, cohort = cohort) # AUC only
+        plotVariance(df_org, cohort = cohort)
 
-    # getPerformancevsOverfittingPlot(df_org, fname = "Figure_5")
-    getAUCIntvsExt(df_org, metric = "AUC", fname="Figure_5", leg_anchor = 1.085)
-    getTimings(df_org)
-    generateRelationPlots(df_org) # AUC only
     joinRelationPlot()
-    generatePlotsPerDataset(df_org) # AUC only
     joinRepeatsPlot()
-    plotVariance(df_org)
 
-    # supplementary
-    # smetrics = ['Accuracy', 'Precision', 'Recall', 'F1', 'MCC', 'Sensitivity', 'Specificity']
-    # for s in smetrics:
-    #     getSummaryTable(df_org, fname = f'Supp_Table_{s}', metric = s)
-    #     getPerformancevsOverfittingPlot(df_org, metric = s, fname = f"Supp_POPlot_{s}.png")
 
 
 #

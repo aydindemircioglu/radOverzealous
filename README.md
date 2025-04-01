@@ -16,9 +16,29 @@ Follow the instructions in the PymRMRe folder to install it.
 
 
 
+## Datasets
+
+The radMLBench datasets will be downloaded automatically and stored
+in the `./datasets` folder. However, the UCI data must be retrieved manually
+from the repository shared by Wainer and Gawley at:  
+https://figshare.com/articles/dataset/Nested_cross_validation_is_overzealous/3457238  
+
+After downloading, extract the datasets from the file `alldata.zip` into the `./dataUCI` folder.  
+The resulting directory structure will be:
+
+dataUCI/  
+  ├── abalone/  
+  │   ├── abalone.arff  
+  ├── acute-inflammation/  
+  │   ├── acute-inflammation.arff  
+  ...  
+
+
+
 ## Experiment
 
-Run the experiment with `python3 ./experiment.py`.
+Run the experiment with `python3 ./experiment.py --cohort=radMLBench` and
+`python3 ./experiment.py --cohort=UCI`, for the radiomics and non-radiomics data respectively.
 
 NOTE: Adjust the number of CPUs at the end of the script in the
 line `results = Parallel(n_jobs=30)(`
@@ -27,6 +47,9 @@ Change  30 to match your system's setup.
 **WARNING**: On a 16-core 2nd-gen Threadripper, the experiment took
 nearly a month to complete. Newer CPUs might be faster, however,
 keep in mind that it will take considerable CPU time.
+
+**WARNING**: Overall around 400 GB of results will be created.
+Ensure that your hard drive does not run out of space!
 
 
 ## Evaluation

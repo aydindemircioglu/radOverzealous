@@ -19,6 +19,12 @@ def ttest_score(X, y):
     return np.array(scores)
 
 
+
+def dummy_score (X, y):
+    scores = np.ones(X.shape[1])
+    return scores
+
+
 def bhattacharyya_score_fct (X, y):
     yn = y/np.sum(y)
     yn = np.asarray(yn, dtype = np.float32)
