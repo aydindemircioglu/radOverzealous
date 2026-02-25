@@ -5,7 +5,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, f1_score, accuracy_score, precision_score, recall_score, matthews_corrcoef, roc_curve
+from sklearn.metrics import roc_auc_score, f1_score, accuracy_score, precision_score, recall_score
+from sklearn.metrics import precision_recall_curve, matthews_corrcoef, roc_curve
 from scipy.optimize import minimize_scalar
 
 import os
@@ -29,7 +30,7 @@ optuna.logging.set_verbosity(optuna.logging.FATAL)
 
 
 # overall repeats of the whole procedures
-nRepeats = 25
+nRepeats = 10
 search_space = None
 
 
@@ -117,8 +118,26 @@ def getClassifier(params):
     return clf
 
 
+def compute_metric(y_true, y_pred_proba, metric):
+    ''' Used for optimization '''
+    metric = metric.lower()
+    if metric == "auc":
+        return roc_auc_score(y_true, y_pred_proba)
 
-def objective_flat_cv (trial, X, y, k, n_repeats, cfg, exp_number):
+    elif metric == "mcc":
+        y_pred_bin_05 = (np.array(y_pred_proba) >= 0.5).astype(int)
+        return matthews_corrcoef(y_true, y_pred_bin_05)
+
+    elif metric == "f1":
+        y_pred_bin_05 = (np.array(y_pred_proba) >= 0.5).astype(int)
+        return f1_score(y_true, y_pred_bin_05)
+
+    else:
+        raise ValueError(f"Unknown metric: {metric}")
+
+
+
+def objective_flat_cv (trial, X, y, k, n_repeats, cfg, exp_number, metric):
     np.random.seed(42)
     random.seed(42)
 
@@ -158,14 +177,15 @@ def objective_flat_cv (trial, X, y, k, n_repeats, cfg, exp_number):
 
     y_preds_flat = [p for y in y_preds for p in y]
     y_gts_flat = [gt for y in y_gts for gt in y]
-    cv_auc = roc_auc_score(y_gts_flat, y_preds_flat)
+    cv_score = compute_metric(y_gts_flat, y_preds_flat, metric)
 
-    # corresponds to performance on all validation folds across repeats
+    # store results in Optuna trial
     trial.set_user_attr("ensemble_models", models)
     trial.set_user_attr("y_preds_int", y_preds_flat)
     trial.set_user_attr("y_gts_int", y_gts_flat)
-    trial.set_user_attr("auc_int", cv_auc)
-    return cv_auc # used to find the best model
+    trial.set_user_attr("metric", metric)
+    trial.set_user_attr("score", cv_score)
+    return cv_score
 
 
 
@@ -179,9 +199,27 @@ def retrain_model (X_train, y_train, best_params):
 
 
 def get_metrics (y_test, ensemble_y_probs):
-    auc_true = roc_auc_score(y_test, ensemble_y_probs)
+    ensemble_y_probs = np.array(ensemble_y_probs)
+    y_test = np.array(y_test)
 
-    # mertics
+    y_pred_bin_05 = (ensemble_y_probs >= 0.5).astype(int)
+    accuracy = accuracy_score(y_test, y_pred_bin_05)
+
+    mcc_true = matthews_corrcoef(y_test, y_pred_bin_05)
+    f1_true = f1_score(y_test, y_pred_bin_05)
+
+    # F1-optimal threshold to get precision/recall
+    f1_true = compute_metric(y_test, ensemble_y_probs, "f1")
+    precision_curve, recall_curve, thresholds_pr = precision_recall_curve(y_test, ensemble_y_probs) # duplicated somehow, well
+    f1_scores = 2 * (precision_curve * recall_curve) / (precision_curve + recall_curve + 1e-10)
+    best_f1_idx = np.argmax(f1_scores)
+    optimal_threshold_f1 = thresholds_pr[best_f1_idx]
+    y_pred_bin_f1 = (ensemble_y_probs >= optimal_threshold_f1).astype(int)
+    precision = precision_score(y_test, y_pred_bin_f1)
+    recall = recall_score(y_test, y_pred_bin_f1)
+
+    # Youden-optimal threshold → get sensitivity/specificity
+    auc_true = compute_metric(y_test, ensemble_y_probs, "auc")
     fpr, tpr, thresholds = roc_curve(y_test, ensemble_y_probs)
     thresholds = thresholds[np.isfinite(thresholds)]
 
@@ -196,18 +234,16 @@ def get_metrics (y_test, ensemble_y_probs):
 
     sensitivity = tpr[idx_optimal]
     specificity = 1 - fpr[idx_optimal]
-    y_pred_bin = (ensemble_y_probs >= optimal_threshold).astype(int)
 
     metrics = {
         "auc": auc_true,
-        "accuracy": accuracy_score(y_test, y_pred_bin),
-        "precision": precision_score(y_test, y_pred_bin),
-        "recall": recall_score(y_test, y_pred_bin),
-        "f1": f1_score(y_test, y_pred_bin),
-        "mcc": matthews_corrcoef(y_test, y_pred_bin),
+        "f1": f1_true,
+        "mcc": mcc_true,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
         "sensitivity": sensitivity,
         "specificity": specificity,
-        "optimal_threshold": optimal_threshold,
         "y_test_prob": ensemble_y_probs,
         "y_test_true": y_test
     }
@@ -242,10 +278,10 @@ def rep_flat_cv (X, y, k, valrepeats, cfg):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         study = optuna.create_study(sampler=optuna.samplers.BruteForceSampler(), direction="maximize")
-        study.optimize(lambda trial: objective_flat_cv (trial, X, y, k, valrepeats, cfg, exp_number))
+        study.optimize(lambda trial: objective_flat_cv (trial, X, y, k, valrepeats, cfg, exp_number, metric = cfg["metric"]))
         best_params = study.best_params
         best_trial = study.best_trial
-        best_auc = study.best_value
+        best_auc = study.best_value # still called auc...
 
     # compute metrics of best model
     metrics = get_metrics (best_trial.user_attrs.get("y_gts_int"), best_trial.user_attrs.get("y_preds_int"))
@@ -346,7 +382,7 @@ def rep_nested_cv(X, y, k, l, valrepeats, cfg):
     total_time = end_time - start_time
 
     start_time = time.time()
-    flat_model = rep_flat_cv (X_train, y_train, k, valrepeats, cfg)
+    flat_model = rep_flat_cv (X, y, k, valrepeats, cfg)
     end_time = time.time()
     total_refit_time = end_time - start_time
 
@@ -374,8 +410,8 @@ def apply_validation (cfg):
     try:
         os.makedirs("./results", exist_ok=True)
 
-        dataset, valscheme, valrepeats, repeat = (
-            cfg["dataset"], cfg["valscheme"], cfg["valrepeats"], cfg["repeat"]
+        dataset, valscheme, valrepeats, repeat, metric = (
+            cfg["dataset"], cfg["valscheme"], cfg["valrepeats"], cfg["repeat"], cfg["metric"]
         )
 
         if "datacollection" in cfg and cfg["datacollection"] == "UCI":
@@ -384,7 +420,7 @@ def apply_validation (cfg):
             X, y = radMLBench.loadData(dataset, return_X_y=True, local_cache_dir="./datasets")
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.5, random_state=repeat, stratify=y)
 
-        resFile = f"./results/{dataset}_{valrepeats}_{valscheme}_{repeat}.dump"
+        resFile = f"./results/{dataset}_{valrepeats}_{valscheme}_{repeat}_{metric}.dump"
         if os.path.exists(resFile):
             return None
 
@@ -458,7 +494,6 @@ def main(cohort: str = typer.Option(...)):
                     large_datasets.append(dataset)
 
     print(f"Have {len(large_datasets)} datasets with more than 100 samples.")
-
     valSchemes = ["CV-5", "CV-10", "CVHoldout-5", "CVHoldout-10", \
                         "NestedCV-5+10", "NestedCV-10+5"] # "NestedCV-5+5",
 
@@ -468,13 +503,15 @@ def main(cohort: str = typer.Option(...)):
         for dataset in large_datasets:
             for valscheme in valSchemes:
                 for valrepeats in [1, 5]:
+                    for metric in ["AUC", "F1", "MCC"]:
                     # every experiment needs to be called R times
                     exp_params = {
                         "dataset": dataset,
                         "valscheme": valscheme,
                         "valrepeats": valrepeats,
                         "repeat": r,
-                        "datacollection": cohort
+                            "datacollection": cohort,
+                            "metric": metric
                     }
                     subexp.append(exp_params)
         random.shuffle(subexp)
@@ -482,18 +519,11 @@ def main(cohort: str = typer.Option(...)):
     random.shuffle(experiments)
 
     print (f"Computing {len(experiments)} experiments.")
-
     results = Parallel(n_jobs=30)(
         delayed(apply_validation)(e) for e in experiments
     )
 
 if __name__ == "__main__":
     typer.run(main)
-
-
-
-    # for e in experiments:
-    #     apply_validation(e)
-
 
 #
