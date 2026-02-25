@@ -23,7 +23,7 @@ from PIL import ImageDraw, ImageFont
 
 import radMLBench
 from loadDataUCI import *
-from utils import *
+#from utils import *
 
 
 
@@ -1221,7 +1221,8 @@ def createFigure8():
 
 if __name__ == '__main__':
     os.makedirs("paper", exist_ok = True)
-    for cohort in ["radMLBench", "UCI"]:
+    # for cohort in ["radMLBench", "UCI"]:
+    for cohort in ["UCI"]:
         print (f"\n\n\nProcessing cohort {cohort}")
         propTbl = createDatasetTable(cohort)
         for metric in ["AUC", "MCC", "F1"]:
