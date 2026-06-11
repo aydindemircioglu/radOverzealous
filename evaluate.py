@@ -23,7 +23,7 @@ from PIL import ImageDraw, ImageFont
 
 import radMLBench
 from loadDataUCI import *
-#from utils import *
+from utils import *
 
 
 
@@ -91,6 +91,7 @@ def process_file(z, propTbl, metric):
              return []
 
          df = load(z)
+         # print (".", end = '', flush = True)
 
          base = {"Dataset": df["dataset"], "CV": df["type"]}
          dataset = df["dataset"]
@@ -306,7 +307,7 @@ def testRelations(diffs, ID, cohort = None, metric = "AUC", DPI = 300):
     axes[0].fill_between(nFeatures_values[sorted_indices], y_pred_lower[sorted_indices], y_pred_upper[sorted_indices], color='grey', alpha=0.3)
     axes[0].text(0.42, 0.97, f"$R^2 = {r_value**2:.2f}$\n(p = {p_value:.2g})", transform=axes[0].transAxes, fontsize=15, verticalalignment='top')
     axes[0].set_xlabel("Number of Features", fontsize=axis_fontsize)
-    axes[0].set_ylabel(f"Overfitting (in {metric})", fontsize=axis_fontsize)
+    axes[0].set_ylabel(f"Overestimation (in {metric})", fontsize=axis_fontsize)
     axes[0].axhline(y=0.0, color='red', linewidth=2, zorder=2,  linestyle='--')
 
     slope, intercept, r_value, p_value, std_err = linregress(nInstances_values, diff_values)
@@ -325,7 +326,7 @@ def testRelations(diffs, ID, cohort = None, metric = "AUC", DPI = 300):
     axes[1].fill_between(nInstances_values[sorted_indices], y_pred_lower[sorted_indices], y_pred_upper[sorted_indices], color='grey', alpha=0.3)
     axes[1].text(0.42, 0.97, f"$R^2 = {r_value**2:.2f}$\n(p = {p_value:.2g})", transform=axes[1].transAxes, fontsize=15, verticalalignment='top')
     axes[1].set_xlabel("Number of Instances", fontsize=axis_fontsize)
-    axes[1].set_ylabel(f"Overfitting (in {metric})", fontsize=axis_fontsize)
+    axes[1].set_ylabel(f"Overestimation (in {metric})", fontsize=axis_fontsize)
 #    axes[1].text(-0.17, -0.08, "(b)", transform=axes[1].transAxes, fontsize=20, verticalalignment='top', horizontalalignment='left')
     axes[1].axhline(y=0.0, color='red', linewidth=2, zorder=2,  linestyle='--')
 
@@ -350,7 +351,7 @@ def testRelations(diffs, ID, cohort = None, metric = "AUC", DPI = 300):
     #axes[2].fill_between(dimensionality_values[sorted_indices], y_pred_lower[sorted_indices], y_pred_upper[sorted_indices], color='grey', alpha=0.3)
     axes[2].text(0.42, 0.97, f"$R^2 = {r_value**2:.2f}$\n(p = {p_value:.2g})", transform=axes[2].transAxes, fontsize=15, verticalalignment='top')
     axes[2].set_xlabel("Dimensionality", fontsize=axis_fontsize)
-    axes[2].set_ylabel(f"Overfitting (in {metric})", fontsize=axis_fontsize)
+    axes[2].set_ylabel(f"Overestimation (in {metric})", fontsize=axis_fontsize)
 #    axes[2].text(-0.17, -0.08, "(c)", transform=axes[2].transAxes, fontsize=20, verticalalignment='top', horizontalalignment='left')
     axes[2].axhline(y=0.0, color='red', linewidth=2, zorder=2,  linestyle='--')
 
@@ -556,7 +557,7 @@ def plotVariance (df_org, cohort = None, fname = None, metric = "AUC"):
 
     # Set title and labels
     ax.set_title("", fontsize=23, pad=20)
-    ax.set_ylabel(f"Standard deviation of {metric}-Overfitting", fontsize=14)
+    ax.set_ylabel(f"Standard deviation of {metric}-Overestimation", fontsize=14)
     ax.set_xlabel(f"", fontsize=14)
 
 
@@ -770,7 +771,7 @@ def generatePlotsPerDataset (df_org, cohort = None, metric = "AUC"):
             ax.set_ylim(-0.4, 0.4)
             ax.set_title(dataset, fontsize=23, pad=20)
             ax.set_xlabel("", fontsize=14)
-            ax.set_ylabel(f"{metric}-Overfitting", fontsize=14)
+            ax.set_ylabel(f"{metric}-Overestimation", fontsize=14)
             ax.axhline(y=0.0, color='red', linewidth=2, zorder=2)
 
         plt.tight_layout()
@@ -877,7 +878,7 @@ def getTimings(df_org, cohort = None):
 
 
 def getOverfittingStats(df_org, fname = None, metric = "AUC"):
-    print (f"\n\nOverfitting stats for {metric}")
+    print (f"\n\Overestimation stats for {metric}")
     df = groupData (df_org, metric)
 
     id_columns = ['CV', 'CV-Repeats', 'Folds', 'Evaluation']
@@ -894,11 +895,11 @@ def getOverfittingStats(df_org, fname = None, metric = "AUC"):
     flat_subset = z[z.index.str.contains("flat_cv_k_5")].abs()
     min_v, max_v = flat_subset.min(), flat_subset.max()
     #print (z)
-    print(f"Reduction in overfitting for {metric} repeat 1 -> 5: {min_v:.3f} - {max_v:.3f}")
+    print(f"Reduction in Overestimation for {metric} repeat 1 -> 5: {min_v:.3f} - {max_v:.3f}")
 
     other_subset = z[~z.index.str.contains("flat_cv_k")].abs()
     min_o, max_o = other_subset.min(), other_subset.max()
-    print(f"Reduction in overfitting for {metric} repeat 1 -> 5 (other schemes): {min_o:.3f} - {max_o:.3f}")
+    print(f"Reduction in Overestimation for {metric} repeat 1 -> 5 (other schemes): {min_o:.3f} - {max_o:.3f}")
 
     D5 = mean_table.query("Folds == 5 or Folds == '5_10' ").reset_index()
     D10 = mean_table.query("Folds == 10 or Folds == '10_5' ").reset_index()
@@ -911,7 +912,7 @@ def getOverfittingStats(df_org, fname = None, metric = "AUC"):
 
     flat_subset = z[z.index.str.contains("flat_cv_k_5")].abs()
     min_v, max_v = flat_subset.min(), flat_subset.max()
-    print(f"Reduction in overfitting for {metric} folds 5 -> 10: {min_v:.3f} - {max_v:.3f}")
+    print(f"Reduction in Overestimation for {metric} folds 5 -> 10: {min_v:.3f} - {max_v:.3f}")
 
 
     other_subset = z[~z.index.str.contains("flat_cv_k")].abs()
@@ -1221,8 +1222,7 @@ def createFigure8():
 
 if __name__ == '__main__':
     os.makedirs("paper", exist_ok = True)
-    # for cohort in ["radMLBench", "UCI"]:
-    for cohort in ["UCI"]:
+    for cohort in ["radMLBench", "UCI"]:
         print (f"\n\n\nProcessing cohort {cohort}")
         propTbl = createDatasetTable(cohort)
         for metric in ["AUC", "MCC", "F1"]:
@@ -1234,7 +1234,7 @@ if __name__ == '__main__':
             summary_table = getSummaryTable(df_org, cohort = cohort, fname = fname, metric = metric)
             print (summary_table)
             largest_row = summary_table.sort_values(by=f'{metric}-Overfitting', key=lambda x: x.str.split(" ").str[0].astype(float), ascending=False).iloc[0:1]
-            print (f"Overfitting for {metric} on {cohort}")
+            print (f"Overestimation for {metric} on {cohort}")
             print (largest_row)
 
             getOverfittingStats(df_org, fname = None, metric = metric)
